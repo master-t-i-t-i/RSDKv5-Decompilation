@@ -1,0 +1,133 @@
+name: Build Mania Shield (Android 5.1 + Plus)
+
+# Build personnel de Sonic Mania pour la Nvidia Shield Portable (Android 5.1, armeabi-v7a).
+# - corrections Android 5.1 (musique sans thread asynchrone, liberation des references JNI)
+# - Plus actif (build personnel, a utiliser avec sa propre copie de Sonic Mania Plus)
+# Lancement : onglet Actions -> "Build Mania Shield" -> Run workflow
+
+on:
+  workflow_dispatch:
+
+jobs:
+  mania-shield:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout RSDKv5
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Checkout Sonic Mania
+        uses: actions/checkout@v4
+        with:
+          repository: "RSDKModding/Sonic-Mania-Decompilation"
+          path: "Sonic-Mania-Decompilation"
+      - name: Correctifs Android 5.1
+        run: |
+          cat > shield51.patch <<'PATCH_EOF'
+          diff --git a/RSDKv5/RSDK/Audio/Oboe/OboeAudioDevice.cpp b/RSDKv5/RSDK/Audio/Oboe/OboeAudioDevice.cpp
+          index 912ef1d..f7a76f8 100644
+          --- a/RSDKv5/RSDK/Audio/Oboe/OboeAudioDevice.cpp
+          +++ b/RSDKv5/RSDK/Audio/Oboe/OboeAudioDevice.cpp
+          @@ -103,10 +103,8 @@ void AudioDevice::FrameInit()
+           
+           void AudioDevice::HandleStreamLoad(ChannelInfo *channel, bool32 async)
+           {
+          -    if (async) {
+          -        pthread_t loadThread;
+          -        pthread_create(&loadThread, NULL, LoadStreamASync, channel);
+          -    }
+          -    else
+          -        LoadStream(channel);
+          +    // Shield/Android 5.1 : chargement synchrone (le thread asynchrone utilise JNI
+          +    // et se termine sans DetachCurrentThread, ce qui fait planter ART sur Android 5)
+          +    (void)async;
+          +    LoadStream(channel);
+           };
+          \ No newline at end of file
+          diff --git a/RSDKv5/RSDK/Core/ModAPI.cpp b/RSDKv5/RSDK/Core/ModAPI.cpp
+          index e09a301..34d4acc 100644
+          --- a/RSDKv5/RSDK/Core/ModAPI.cpp
+          +++ b/RSDKv5/RSDK/Core/ModAPI.cpp
+          @@ -20,7 +20,9 @@ bool fs::exists(fs::path path)
+               auto *jni        = GetJNISetup();
+               jbyteArray array = jni->env->NewByteArray(path.string().length());
+               jni->env->SetByteArrayRegion(array, 0, path.string().length(), (jbyte *)path.string().c_str());
+          -    return jni->env->CallBooleanMethod(jni->thiz, fsExists, array);
+          +    bool r = jni->env->CallBooleanMethod(jni->thiz, fsExists, array);
+          +    jni->env->DeleteLocalRef(array);
+          +    return r;
+           }
+           
+           bool fs::is_directory(fs::path path)
+          @@ -28,7 +30,9 @@ bool fs::is_directory(fs::path path)
+               auto *jni        = GetJNISetup();
+               jbyteArray array = jni->env->NewByteArray(path.string().length());
+               jni->env->SetByteArrayRegion(array, 0, path.string().length(), (jbyte *)path.string().c_str());
+          -    return jni->env->CallBooleanMethod(jni->thiz, fsIsDir, array);
+          +    bool r = jni->env->CallBooleanMethod(jni->thiz, fsIsDir, array);
+          +    jni->env->DeleteLocalRef(array);
+          +    return r;
+           }
+           
+           fs::path_list fs::directory_iterator(fs::path path)
+          diff --git a/RSDKv5/RSDK/Dev/Debug.cpp b/RSDKv5/RSDK/Dev/Debug.cpp
+          index 61275f7..383af0a 100644
+          --- a/RSDKv5/RSDK/Dev/Debug.cpp
+          +++ b/RSDKv5/RSDK/Dev/Debug.cpp
+          @@ -98,6 +98,7 @@ void RSDK::PrintLog(int32 mode, const char *message, ...)
+                       jbyteArray array = jni->env->NewByteArray(len); // as per research, this gets freed automatically
+                       jni->env->SetByteArrayRegion(array, 0, len, (jbyte *)outputString);
+                       jni->env->CallVoidMethod(jni->thiz, writeLog, array, as);
+          +            jni->env->DeleteLocalRef(array); // Android < 8 : table limitee a 512 references
+           #elif RETRO_PLATFORM == RETRO_SWITCH
+                       printf("%s", outputString);
+           #endif
+          diff --git a/dependencies/android/androidHelpers.cpp b/dependencies/android/androidHelpers.cpp
+          index 9284fd8..c9a9fbb 100644
+          --- a/dependencies/android/androidHelpers.cpp
+          +++ b/dependencies/android/androidHelpers.cpp
+          @@ -48,6 +48,7 @@ FileIO *fOpen(const char *path, const char *mode)
+               jbyteArray jpath = _jni_setup.env->NewByteArray(strlen(path));
+               _jni_setup.env->SetByteArrayRegion(jpath, 0, strlen(path), (jbyte*)path);
+               int fd        = _jni_setup.env->CallIntMethod(_jni_setup.thiz, getFD, jpath, mode[0]);
+          +    _jni_setup.env->DeleteLocalRef(jpath); // Android < 8 : table limitee a 512 references
+               if (!fd)
+                   return NULL;
+               return fdopen(fd, mode);
+          PATCH_EOF
+          git apply --verbose shield51.patch
+      - name: Setup RSDKv5 dependencies
+        working-directory: ./dependencies/android
+        run: |
+          curl -L -O https://downloads.xiph.org/releases/ogg/libogg-1.3.5.zip
+          curl -L -O https://downloads.xiph.org/releases/theora/libtheora-1.1.1.zip
+          unzip \*.zip
+          rm *.zip
+          rsync -ar libogg-*/* libogg
+          mv libtheora-* libtheora
+      - name: Setup symlinks
+        run: |
+          rm Game
+          rmdir $PWD/Sonic-Mania-Decompilation/dependencies/RSDKv5
+          ln -s $PWD $PWD/Sonic-Mania-Decompilation/dependencies/RSDKv5
+          ln -s $PWD/Sonic-Mania-Decompilation ./android/app/jni/Game
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Build (armeabi-v7a, RSDKv5 rev 2, Plus actif)
+        working-directory: ./android
+        run: |
+          ./gradlew assemble --no-daemon -PABIFILTERS="armeabi-v7a" -PRETRO_REVISION=2
+          mkdir -p ../artifacts
+          mv app/build/outputs/apk/release/*.apk ../artifacts/rsdkv5_mania_shield.apk
+      - name: Cleanup
+        run: rm $PWD/Sonic-Mania-Decompilation/dependencies/RSDKv5
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: mania-shield
+          path: artifacts
