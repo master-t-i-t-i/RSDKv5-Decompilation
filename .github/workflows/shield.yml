@@ -50,6 +50,22 @@ jobs:
           rep("RSDKv5/RSDK/Core/ModAPI.cpp",
               "return jni->env->CallBooleanMethod(jni->thiz, fsIsDir, array);",
               "bool r = jni->env->CallBooleanMethod(jni->thiz, fsIsDir, array); jni->env->DeleteLocalRef(array); return r;")
+      - name: Nom et icone (icon.png a la racine du depot, optionnel)
+        run: |
+          sed -i 's|<string name="app_name">RSDKv5</string>|<string name="app_name">Sonic Mania</string>|' android/app/src/main/res/values/strings.xml
+          if [ -f icon.png ]; then
+            python3 -m pip install --quiet --break-system-packages pillow || python3 -m pip install --quiet pillow
+            python3 - <<'PY'
+          from PIL import Image
+          src = Image.open("icon.png").convert("RGBA")
+          for d, px in {"mdpi": 48, "hdpi": 72, "xhdpi": 96, "xxhdpi": 144, "xxxhdpi": 192}.items():
+              src.resize((px, px), Image.LANCZOS).save(f"android/app/src/main/res/mipmap-{d}/ic_launcher.png")
+              print("icone", d, px)
+          PY
+            rm -f android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+          else
+            echo "pas de icon.png : icone d'origine conservee"
+          fi
       - name: Setup RSDKv5 dependencies
         working-directory: ./dependencies/android
         run: |
