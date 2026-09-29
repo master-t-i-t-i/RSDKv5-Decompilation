@@ -22,80 +22,34 @@ jobs:
           repository: "RSDKModding/Sonic-Mania-Decompilation"
           path: "Sonic-Mania-Decompilation"
       - name: Correctifs Android 5.1
+        shell: python3 {0}
         run: |
-          cat > shield51.patch <<'PATCH_EOF'
-          diff --git a/RSDKv5/RSDK/Audio/Oboe/OboeAudioDevice.cpp b/RSDKv5/RSDK/Audio/Oboe/OboeAudioDevice.cpp
-          index 912ef1d..f7a76f8 100644
-          --- a/RSDKv5/RSDK/Audio/Oboe/OboeAudioDevice.cpp
-          +++ b/RSDKv5/RSDK/Audio/Oboe/OboeAudioDevice.cpp
-          @@ -103,10 +103,8 @@ void AudioDevice::FrameInit()
-           
-           void AudioDevice::HandleStreamLoad(ChannelInfo *channel, bool32 async)
-           {
-          -    if (async) {
-          -        pthread_t loadThread;
-          -        pthread_create(&loadThread, NULL, LoadStreamASync, channel);
-          -    }
-          -    else
-          -        LoadStream(channel);
-          +    // Shield/Android 5.1 : chargement synchrone (le thread asynchrone utilise JNI
-          +    // et se termine sans DetachCurrentThread, ce qui fait planter ART sur Android 5)
-          +    (void)async;
-          +    LoadStream(channel);
-           };
-          \ No newline at end of file
-          diff --git a/RSDKv5/RSDK/Core/ModAPI.cpp b/RSDKv5/RSDK/Core/ModAPI.cpp
-          index e09a301..34d4acc 100644
-          --- a/RSDKv5/RSDK/Core/ModAPI.cpp
-          +++ b/RSDKv5/RSDK/Core/ModAPI.cpp
-          @@ -20,7 +20,9 @@ bool fs::exists(fs::path path)
-               auto *jni        = GetJNISetup();
-               jbyteArray array = jni->env->NewByteArray(path.string().length());
-               jni->env->SetByteArrayRegion(array, 0, path.string().length(), (jbyte *)path.string().c_str());
-          -    return jni->env->CallBooleanMethod(jni->thiz, fsExists, array);
-          +    bool r = jni->env->CallBooleanMethod(jni->thiz, fsExists, array);
-          +    jni->env->DeleteLocalRef(array);
-          +    return r;
-           }
-           
-           bool fs::is_directory(fs::path path)
-          @@ -28,7 +30,9 @@ bool fs::is_directory(fs::path path)
-               auto *jni        = GetJNISetup();
-               jbyteArray array = jni->env->NewByteArray(path.string().length());
-               jni->env->SetByteArrayRegion(array, 0, path.string().length(), (jbyte *)path.string().c_str());
-          -    return jni->env->CallBooleanMethod(jni->thiz, fsIsDir, array);
-          +    bool r = jni->env->CallBooleanMethod(jni->thiz, fsIsDir, array);
-          +    jni->env->DeleteLocalRef(array);
-          +    return r;
-           }
-           
-           fs::path_list fs::directory_iterator(fs::path path)
-          diff --git a/RSDKv5/RSDK/Dev/Debug.cpp b/RSDKv5/RSDK/Dev/Debug.cpp
-          index 61275f7..383af0a 100644
-          --- a/RSDKv5/RSDK/Dev/Debug.cpp
-          +++ b/RSDKv5/RSDK/Dev/Debug.cpp
-          @@ -98,6 +98,7 @@ void RSDK::PrintLog(int32 mode, const char *message, ...)
-                       jbyteArray array = jni->env->NewByteArray(len); // as per research, this gets freed automatically
-                       jni->env->SetByteArrayRegion(array, 0, len, (jbyte *)outputString);
-                       jni->env->CallVoidMethod(jni->thiz, writeLog, array, as);
-          +            jni->env->DeleteLocalRef(array); // Android < 8 : table limitee a 512 references
-           #elif RETRO_PLATFORM == RETRO_SWITCH
-                       printf("%s", outputString);
-           #endif
-          diff --git a/dependencies/android/androidHelpers.cpp b/dependencies/android/androidHelpers.cpp
-          index 9284fd8..c9a9fbb 100644
-          --- a/dependencies/android/androidHelpers.cpp
-          +++ b/dependencies/android/androidHelpers.cpp
-          @@ -48,6 +48,7 @@ FileIO *fOpen(const char *path, const char *mode)
-               jbyteArray jpath = _jni_setup.env->NewByteArray(strlen(path));
-               _jni_setup.env->SetByteArrayRegion(jpath, 0, strlen(path), (jbyte*)path);
-               int fd        = _jni_setup.env->CallIntMethod(_jni_setup.thiz, getFD, jpath, mode[0]);
-          +    _jni_setup.env->DeleteLocalRef(jpath); // Android < 8 : table limitee a 512 references
-               if (!fd)
-                   return NULL;
-               return fdopen(fd, mode);
-          PATCH_EOF
-          git apply --verbose shield51.patch
+          def rep(path, old, new):
+              s = open(path).read()
+              if s.count(old) != 1:
+                  raise SystemExit("motif introuvable dans " + path + " : " + old)
+              open(path, "w").write(s.replace(old, new))
+              print("OK", path)
+
+          # 1) musique : chargement synchrone (evite un thread JNI jamais detache -> plantage ART Android 5)
+          rep("RSDKv5/RSDK/Audio/Oboe/OboeAudioDevice.cpp",
+              "pthread_create(&loadThread, NULL, LoadStreamASync, channel);",
+              "(void)loadThread; LoadStream(channel); // Shield Android 5.1 : chargement synchrone")
+          # 2) journal : liberer la reference JNI locale (table limitee a 512 avant Android 8)
+          rep("RSDKv5/RSDK/Dev/Debug.cpp",
+              "jni->env->CallVoidMethod(jni->thiz, writeLog, array, as);",
+              "jni->env->CallVoidMethod(jni->thiz, writeLog, array, as); jni->env->DeleteLocalRef(array);")
+          # 3) ouverture de fichiers
+          rep("dependencies/android/androidHelpers.cpp",
+              "int fd        = _jni_setup.env->CallIntMethod(_jni_setup.thiz, getFD, jpath, mode[0]);",
+              "int fd        = _jni_setup.env->CallIntMethod(_jni_setup.thiz, getFD, jpath, mode[0]); _jni_setup.env->DeleteLocalRef(jpath);")
+          # 4) fonctions fichiers des mods
+          rep("RSDKv5/RSDK/Core/ModAPI.cpp",
+              "return jni->env->CallBooleanMethod(jni->thiz, fsExists, array);",
+              "bool r = jni->env->CallBooleanMethod(jni->thiz, fsExists, array); jni->env->DeleteLocalRef(array); return r;")
+          rep("RSDKv5/RSDK/Core/ModAPI.cpp",
+              "return jni->env->CallBooleanMethod(jni->thiz, fsIsDir, array);",
+              "bool r = jni->env->CallBooleanMethod(jni->thiz, fsIsDir, array); jni->env->DeleteLocalRef(array); return r;")
       - name: Setup RSDKv5 dependencies
         working-directory: ./dependencies/android
         run: |
