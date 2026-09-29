@@ -70,8 +70,15 @@ jobs:
         with:
           java-version: '21'
           distribution: 'temurin'
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Android SDK / NDK (SDK deja present sur le runner)
+        run: |
+          set +o pipefail
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SDKM" ] || SDKM="$(ls -d $ANDROID_HOME/cmdline-tools/*/bin/sdkmanager | sort -V | tail -1)"
+          yes | "$SDKM" --licenses > /dev/null || true
+          yes | "$SDKM" "ndk;24.0.8215888" "platforms;android-33" > /dev/null || true
+          test -d "$ANDROID_HOME/ndk/24.0.8215888" && echo "NDK OK"
       - name: Build (armeabi-v7a, RSDKv5 rev 2, Plus actif)
         working-directory: ./android
         run: |
